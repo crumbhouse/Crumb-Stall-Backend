@@ -1,0 +1,372 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum AuthProvider {
+  GOOGLE
+  GITHUB
+  MICROSOFT
+  CREDENTIALS
+}
+
+enum AdminApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FoodType {
+  VEG
+  NON_VEG
+}
+
+enum CouponType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PLACED
+  CONFIRMED
+  PREPARING
+  READY_FOR_PICKUP
+  OTP_VERIFICATION_PENDING
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  RAZORPAY
+}
+
+enum NotificationType {
+  ORDER_PLACED
+  ORDER_CONFIRMED
+  ORDER_PREPARING
+  READY_FOR_PICKUP
+  OTP_GENERATED
+  ORDER_COMPLETED
+  COUPON
+}
+
+enum AnalyticsPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  name          String?
+  imageUrl      String?
+  role          UserRole       @default(CUSTOMER)
+  provider      AuthProvider   @default(GOOGLE)
+  providerId    String?
+  passwordHash  String?
+  adminApprovalStatus AdminApprovalStatus @default(APPROVED)
+  adminRequestedAt DateTime?
+  adminApprovedAt DateTime?
+  adminApprovedByEmail String?
+  isSuspended   Boolean        @default(false)
+  lastActivity  DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  cart          Cart?
+  orders        Order[]
+  reviews       Review[]
+  favorites     Favorite[]
+  notifications Notification[]
+  couponUsages  CouponUsage[]
+
+  @@index([role])
+  @@index([role, adminApprovalStatus])
+  @@index([provider, providerId])
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  imageUrl    String?
+  sortOrder   Int        @default(0)
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  foodItems   FoodItem[]
+}
+
+model FoodItem {
+  id            String      @id @default(cuid())
+  categoryId    String
+  name          String
+  slug          String      @unique
+  description   String
+  ingredients   String[]    @default([])
+  price         Decimal     @db.Decimal(10, 2)
+  discountPrice Decimal?    @db.Decimal(10, 2)
+  imageUrl      String?
+  tags          String[]    @default([])
+  type          FoodType    @default(VEG)
+  ratingAverage Decimal     @default(0) @db.Decimal(3, 2)
+  ratingCount   Int         @default(0)
+  popularity    Int         @default(0)
+  isAvailable   Boolean     @default(true)
+  isFeatured    Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  category      Category    @relation(fields: [categoryId], references: [id])
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  reviews       Review[]
+  favorites     Favorite[]
+
+  @@index([categoryId])
+  @@index([isAvailable, isFeatured])
+  @@index([name])
+}
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+}
+
+model CartItem {
+  id         String   @id @default(cuid())
+  cartId     String
+  foodItemId String
+  quantity   Int      @default(1)
+  note       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  cart       Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  foodItem   FoodItem @relation(fields: [foodItemId], references: [id])
+
+  @@unique([cartId, foodItemId])
+}
+
+model Coupon {
+  id             String        @id @default(cuid())
+  code           String        @unique
+  type           CouponType
+  value          Decimal       @db.Decimal(10, 2)
+  startsAt       DateTime
+  endsAt         DateTime
+  usageLimit     Int?
+  usedCount      Int           @default(0)
+  minimumAmount  Decimal       @default(0) @db.Decimal(10, 2)
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  orders         Order[]
+  couponUsages   CouponUsage[]
+}
+
+model CouponUsage {
+  id        String   @id @default(cuid())
+  couponId  String
+  userId    String
+  orderId   String?
+  createdAt DateTime @default(now())
+  coupon    Coupon   @relation(fields: [couponId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+  order     Order?   @relation(fields: [orderId], references: [id])
+
+  @@index([couponId, userId])
+}
+
+model Order {
+  id                    String        @id @default(cuid())
+  orderNumber           String        @unique
+  checkoutAttemptId     String?       @unique
+  userId                String
+  couponId              String?
+  status                OrderStatus   @default(PENDING_PAYMENT)
+  pickupTime            DateTime?
+  subtotalAmount        Decimal       @db.Decimal(10, 2)
+  taxAmount             Decimal       @default(0) @db.Decimal(10, 2)
+  discountAmount        Decimal       @default(0) @db.Decimal(10, 2)
+  totalAmount           Decimal       @db.Decimal(10, 2)
+  estimatedPrepMinutes  Int?
+  placedAt              DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  user                  User          @relation(fields: [userId], references: [id])
+  coupon                Coupon?       @relation(fields: [couponId], references: [id])
+  items                 OrderItem[]
+  payments              Payment[]
+  otp                   OrderOtp?
+  invoice               Invoice?
+  couponUsages          CouponUsage[]
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  foodItemId  String
+  name        String
+  note        String?
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  totalPrice  Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  foodItem    FoodItem @relation(fields: [foodItemId], references: [id])
+
+  @@index([foodItemId])
+}
+
+model Payment {
+  id                 String          @id @default(cuid())
+  orderId            String
+  provider           PaymentProvider @default(RAZORPAY)
+  status             PaymentStatus   @default(CREATED)
+  amount             Decimal         @db.Decimal(10, 2)
+  currency           String          @default("INR")
+  providerOrderId    String?         @unique
+  providerPaymentId  String?         @unique
+  providerSignature  String?
+  rawPayload         Json?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  order              Order           @relation(fields: [orderId], references: [id])
+
+}
+
+model PaymentWebhookEvent {
+  id                String          @id @default(cuid())
+  provider          PaymentProvider @default(RAZORPAY)
+  eventId           String          @unique
+  event             String
+  providerOrderId   String?
+  providerPaymentId String?
+  rawPayload        Json
+  processedAt       DateTime?
+  createdAt         DateTime        @default(now())
+
+  @@index([provider, event])
+  @@index([providerOrderId])
+  @@index([providerPaymentId])
+}
+
+model OrderOtp {
+  id           String    @id @default(cuid())
+  orderId      String    @unique
+  otpHash      String
+  expiresAt    DateTime
+  verifiedAt   DateTime?
+  attemptCount Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id            String   @id @default(cuid())
+  orderId       String   @unique
+  invoiceNumber String   @unique
+  invoiceUrl    String?
+  generatedAt   DateTime @default(now())
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  userId     String
+  foodItemId String
+  rating     Int
+  comment    String?
+  imageUrls  String[] @default([])
+  isHidden   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id])
+  foodItem   FoodItem @relation(fields: [foodItemId], references: [id])
+
+  @@unique([userId, foodItemId])
+  @@index([foodItemId, isHidden])
+}
+
+model Favorite {
+  id         String   @id @default(cuid())
+  userId     String
+  foodItemId String
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  foodItem   FoodItem @relation(fields: [foodItemId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, foodItemId])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  readAt    DateTime?
+  metadata  Json?
+  createdAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model AnalyticsSnapshot {
+  id        String          @id @default(cuid())
+  period    AnalyticsPeriod
+  startsAt  DateTime
+  endsAt    DateTime
+  metrics   Json
+  createdAt DateTime        @default(now())
+
+  @@unique([period, startsAt, endsAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actorEmail  String?
+  action      String
+  entityType  String
+  entityId    String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+}
