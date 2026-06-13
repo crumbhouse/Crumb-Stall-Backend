@@ -322,115 +322,115 @@ async function main() {
 
   await ensureCart(superAdmin.id);
 
-  const admin = await prisma.user.upsert({
-    where: { email: 'admin@crumbstall.local' },
-    update: {
-      name: 'Crumb Stall Admin',
-      role: UserRole.ADMIN,
-      provider: AuthProvider.CREDENTIALS,
-      adminApprovalStatus: AdminApprovalStatus.APPROVED,
-      adminApprovedAt: new Date(),
-      adminApprovedByEmail: superAdmin.email,
-      isSuspended: false,
-    },
-    create: {
-      email: 'admin@crumbstall.local',
-      name: 'Crumb Stall Admin',
-      role: UserRole.ADMIN,
-      provider: AuthProvider.CREDENTIALS,
-      adminApprovalStatus: AdminApprovalStatus.APPROVED,
-      adminApprovedAt: new Date(),
-      adminApprovedByEmail: superAdmin.email,
-    },
-  });
+  // const admin = await prisma.user.upsert({
+  //   where: { email: 'admin@crumbstall.local' },
+  //   update: {
+  //     name: 'Crumb Stall Admin',
+  //     role: UserRole.ADMIN,
+  //     provider: AuthProvider.CREDENTIALS,
+  //     adminApprovalStatus: AdminApprovalStatus.APPROVED,
+  //     adminApprovedAt: new Date(),
+  //     adminApprovedByEmail: superAdmin.email,
+  //     isSuspended: false,
+  //   },
+  //   create: {
+  //     email: 'admin@crumbstall.local',
+  //     name: 'Crumb Stall Admin',
+  //     role: UserRole.ADMIN,
+  //     provider: AuthProvider.CREDENTIALS,
+  //     adminApprovalStatus: AdminApprovalStatus.APPROVED,
+  //     adminApprovedAt: new Date(),
+  //     adminApprovedByEmail: superAdmin.email,
+  //   },
+  // });
 
-  await ensureCart(admin.id);
+  // await ensureCart(admin.id);
 
-  const categoryRecords = new Map<string, string>();
+  // const categoryRecords = new Map<string, string>();
 
-  for (const category of categories) {
-    const record = await prisma.category.upsert({
-      where: { slug: category.slug },
-      update: category,
-      create: category,
-    });
+  // for (const category of categories) {
+  //   const record = await prisma.category.upsert({
+  //     where: { slug: category.slug },
+  //     update: category,
+  //     create: category,
+  //   });
 
-    categoryRecords.set(category.slug, record.id);
-  }
+  //   categoryRecords.set(category.slug, record.id);
+  // }
 
-  const foodRecords = new Map<string, { id: string; name: string; price: number; discountPrice?: number | null }>();
+  // const foodRecords = new Map<string, { id: string; name: string; price: number; discountPrice?: number | null }>();
 
-  for (const item of foodItems) {
-    const categoryId = categoryRecords.get(item.categorySlug);
+  // for (const item of foodItems) {
+  //   const categoryId = categoryRecords.get(item.categorySlug);
 
-    if (!categoryId) {
-      throw new Error(`Missing seed category for ${item.slug}.`);
-    }
+  //   if (!categoryId) {
+  //     throw new Error(`Missing seed category for ${item.slug}.`);
+  //   }
 
-    const { categorySlug, ...foodData } = item;
-    const record = await prisma.foodItem.upsert({
-      where: { slug: item.slug },
-      update: {
-        ...foodData,
-        categoryId,
-        isAvailable: true,
-        isFeatured: item.isFeatured ?? false,
-      },
-      create: {
-        ...foodData,
-        categoryId,
-        isFeatured: item.isFeatured ?? false,
-      },
-    });
+  //   const { categorySlug, ...foodData } = item;
+  //   const record = await prisma.foodItem.upsert({
+  //     where: { slug: item.slug },
+  //     update: {
+  //       ...foodData,
+  //       categoryId,
+  //       isAvailable: true,
+  //       isFeatured: item.isFeatured ?? false,
+  //     },
+  //     create: {
+  //       ...foodData,
+  //       categoryId,
+  //       isFeatured: item.isFeatured ?? false,
+  //     },
+  //   });
 
-    foodRecords.set(record.slug, {
-      id: record.id,
-      name: record.name,
-      price: Number(record.price),
-      discountPrice: record.discountPrice === null ? null : Number(record.discountPrice),
-    });
-  }
+  //   foodRecords.set(record.slug, {
+  //     id: record.id,
+  //     name: record.name,
+  //     price: Number(record.price),
+  //     discountPrice: record.discountPrice === null ? null : Number(record.discountPrice),
+  //   });
+  // }
 
-  const couponRecords = new Map<string, string>();
+  // const couponRecords = new Map<string, string>();
 
-  for (const coupon of coupons) {
-    const record = await prisma.coupon.upsert({
-      where: { code: coupon.code },
-      update: coupon,
-      create: coupon,
-    });
+  // for (const coupon of coupons) {
+  //   const record = await prisma.coupon.upsert({
+  //     where: { code: coupon.code },
+  //     update: coupon,
+  //     create: coupon,
+  //   });
 
-    couponRecords.set(record.code, record.id);
-  }
+  //   couponRecords.set(record.code, record.id);
+  // }
 
-  const customerIds: string[] = [];
+  // const customerIds: string[] = [];
 
-  for (const customer of demoCustomers) {
-    const record = await prisma.user.upsert({
-      where: { email: customer.email },
-      update: {
-        ...customer,
-        role: UserRole.CUSTOMER,
-        provider: AuthProvider.GOOGLE,
-        isSuspended: false,
-        lastActivity: new Date('2026-06-06T11:20:00.000Z'),
-      },
-      create: {
-        ...customer,
-        role: UserRole.CUSTOMER,
-        provider: AuthProvider.GOOGLE,
-        lastActivity: new Date('2026-06-06T11:20:00.000Z'),
-      },
-    });
+  // for (const customer of demoCustomers) {
+  //   const record = await prisma.user.upsert({
+  //     where: { email: customer.email },
+  //     update: {
+  //       ...customer,
+  //       role: UserRole.CUSTOMER,
+  //       provider: AuthProvider.GOOGLE,
+  //       isSuspended: false,
+  //       lastActivity: new Date('2026-06-06T11:20:00.000Z'),
+  //     },
+  //     create: {
+  //       ...customer,
+  //       role: UserRole.CUSTOMER,
+  //       provider: AuthProvider.GOOGLE,
+  //       lastActivity: new Date('2026-06-06T11:20:00.000Z'),
+  //     },
+  //   });
 
-    await ensureCart(record.id);
-    customerIds.push(record.id);
-  }
+  //   await ensureCart(record.id);
+  //   customerIds.push(record.id);
+  // }
 
-  if (customerIds.length >= 2) {
-    await seedOrders(customerIds[0], customerIds[1], foodRecords, couponRecords);
-    await seedCustomerEngagement(customerIds[0], customerIds[1], foodRecords);
-  }
+  // if (customerIds.length >= 2) {
+  //   await seedOrders(customerIds[0], customerIds[1], foodRecords, couponRecords);
+  //   await seedCustomerEngagement(customerIds[0], customerIds[1], foodRecords);
+  // }
 }
 
 main()
