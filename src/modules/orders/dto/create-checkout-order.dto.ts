@@ -20,6 +20,15 @@ export type StartCheckoutOrderDto = {
   checkoutAttemptId?: string;
 };
 
+export type AdminCreateCounterOrderDto = StartCheckoutOrderDto & {
+  customer: {
+    email?: string;
+    name?: string;
+    phone: string;
+  };
+  paymentCollected: boolean;
+};
+
 export type ConfirmCheckoutPaymentDto = {
   orderNumber: string;
   razorpayOrderId: string;
@@ -51,6 +60,19 @@ export function parseStartCheckoutOrderDto(
       body.checkoutAttemptId.trim()
         ? body.checkoutAttemptId.trim().slice(0, 120)
         : undefined,
+  };
+}
+
+export function parseAdminCreateCounterOrderDto(
+  body: Record<string, unknown>,
+): AdminCreateCounterOrderDto {
+  const checkoutOrder = parseStartCheckoutOrderDto(body);
+  const customer = parseCounterCustomer(body.customer);
+
+  return {
+    ...checkoutOrder,
+    customer,
+    paymentCollected: body.paymentCollected === true,
   };
 }
 
@@ -132,6 +154,42 @@ function parsePickupSlot(value: unknown): CheckoutPickupSlotDto {
     label,
     minutesFromNow,
   };
+}
+
+function parseCounterCustomer(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new BadRequestException('customer is required');
+  }
+
+  const record = value as Record<string, unknown>;
+  const email =
+    typeof record.email === 'string' && record.email.trim()
+      ? record.email.trim().toLowerCase()
+      : undefined;
+  const name =
+    typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim().slice(0, 120)
+      : undefined;
+  const phone =
+    typeof record.phone === 'string' && record.phone.trim()
+      ? normalizePhone(record.phone)
+      : undefined;
+
+  if (!phone) {
+    throw new BadRequestException('customer.phone is required');
+  }
+
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new BadRequestException('customer.email must be a valid email');
+  }
+
+  return { email, name, phone };
+}
+
+function normalizePhone(value: string) {
+  const normalized = value.replace(/\D/g, '').slice(0, 30);
+
+  return normalized.length >= 7 ? normalized : undefined;
 }
 
 function readString(value: unknown, field: string) {

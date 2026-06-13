@@ -188,6 +188,7 @@ function mapInvoice(invoice: InvoiceRecord) {
     subtotalAmount: order.subtotalAmount.toNumber(),
     taxAmount: order.taxAmount.toNumber(),
     discountAmount: order.discountAmount.toNumber(),
+    pickupFeeAmount: calculateDerivedPickupFee(order),
     totalAmount: order.totalAmount.toNumber(),
     couponCode: order.coupon?.code ?? null,
     payment: payment
@@ -201,6 +202,21 @@ function mapInvoice(invoice: InvoiceRecord) {
         }
       : null,
   };
+}
+
+function calculateDerivedPickupFee(order: {
+  subtotalAmount: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
+  discountAmount: Prisma.Decimal;
+  totalAmount: Prisma.Decimal;
+}) {
+  const expectedTotalWithoutPickupFee =
+    order.subtotalAmount.toNumber() -
+    order.discountAmount.toNumber() +
+    order.taxAmount.toNumber();
+  const fee = order.totalAmount.toNumber() - expectedTotalWithoutPickupFee;
+
+  return Math.max(0, Math.round(fee * 100) / 100);
 }
 
 type InvoicePdfData = ReturnType<typeof mapInvoice>;
@@ -294,8 +310,20 @@ function buildInvoicePdfContent(invoice: InvoicePdfData) {
       brand.green,
     );
   }
-  commands.push(line(350, 154, 527, 154, brand.border));
-  totalRow('Tax', invoice.taxAmount, 350, 136, commands);
+  const hasDiscountAndPickupFee = invoice.discountAmount > 0 && invoice.pickupFeeAmount > 0;
+  if (invoice.pickupFeeAmount > 0) {
+    totalRow(
+      'ASAP priority fee',
+      invoice.pickupFeeAmount,
+      350,
+      hasDiscountAndPickupFee ? 150 : 169,
+      commands,
+      [0.54, 0.35, 0],
+    );
+  }
+  const dividerY = hasDiscountAndPickupFee ? 135 : 154;
+  commands.push(line(350, dividerY, 527, dividerY, brand.border));
+  totalRow('Tax', invoice.taxAmount, 350, dividerY - 18, commands);
   commands.push(rect(330, 54, 217, 58, brand.red));
   commands.push(text('Total paid', 350, 84, 12, 'bold', brand.white));
   commands.push(text(formatAmount(invoice.totalAmount), 438, 84, 15, 'bold', brand.white));

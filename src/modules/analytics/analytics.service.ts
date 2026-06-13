@@ -234,6 +234,7 @@ export class AnalyticsService {
           select: {
             name: true,
             email: true,
+            phone: true,
           },
         },
       },

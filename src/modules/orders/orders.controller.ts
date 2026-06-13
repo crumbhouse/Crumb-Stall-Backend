@@ -17,6 +17,7 @@ import { Roles } from '../../common/auth/roles.decorator';
 import { RolesGuard } from '../../common/auth/roles.guard';
 import { AuditService } from '../../infrastructure/audit/audit.service';
 import {
+  parseAdminCreateCounterOrderDto,
   parseConfirmCheckoutPaymentDto,
   parseRecoverCheckoutOrderDto,
   parseStartCheckoutOrderDto,
@@ -58,6 +59,19 @@ export class OrdersController {
     );
   }
 
+  @Post('checkout/cash')
+  createCashCheckoutOrder(
+    @Body() body: Record<string, unknown>,
+    @Headers('x-customer-email') customerEmail?: string,
+    @Headers('x-auth-sync-secret') syncSecret?: string,
+  ) {
+    return this.ordersService.createCashCheckoutOrder(
+      parseStartCheckoutOrderDto(body),
+      customerEmail,
+      syncSecret,
+    );
+  }
+
   @Post('checkout/confirm')
   confirmCheckoutPayment(
     @Body() body: Record<string, unknown>,
@@ -89,6 +103,30 @@ export class OrdersController {
   @Roles(UserRole.ADMIN)
   findAdminOrders(@Query() query: Record<string, unknown>) {
     return this.ordersService.findAdminOrders(parseListOrdersQuery(query));
+  }
+
+  @Post('admin/counter')
+  @UseGuards(AuthenticatedUserGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  async createAdminCounterOrder(
+    @Body() body: Record<string, unknown>,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const order = await this.ordersService.createAdminCounterOrder(
+      parseAdminCreateCounterOrderDto(body),
+    );
+    await this.auditService.record({
+      actor: request.user,
+      action: 'order.counter.create',
+      entityType: 'Order',
+      entityId: order.id,
+      metadata: {
+        orderNumber: order.orderNumber,
+        status: order.status,
+      },
+    });
+
+    return order;
   }
 
   @Get('admin/:orderNumber')

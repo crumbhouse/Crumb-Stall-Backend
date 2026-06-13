@@ -7,12 +7,15 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import {
+  AuthProvider,
+  AdminApprovalStatus,
   NotificationType,
   OrderStatus,
   PaymentStatus,
   Prisma,
+  UserRole,
 } from '@prisma/client';
-import { timingSafeEqual } from 'node:crypto';
+import { randomInt, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { CouponsService } from '../coupons/coupons.service';
 import { LiveEventsService } from '../live/live-events.service';
@@ -20,6 +23,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { OtpService } from '../otp/otp.service';
 import { PaymentsService } from '../payments/payments.service';
 import {
+  AdminCreateCounterOrderDto,
   ConfirmCheckoutPaymentDto,
   RecoverCheckoutOrderDto,
   StartCheckoutOrderDto,
@@ -28,6 +32,7 @@ import { ListOrdersQuery } from './dto/list-orders-query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 
 const ADMIN_STATUS_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
+  [OrderStatus.PENDING_PAYMENT]: [OrderStatus.PLACED, OrderStatus.CANCELLED],
   [OrderStatus.PAID]: [OrderStatus.PREPARING, OrderStatus.CANCELLED],
   [OrderStatus.PLACED]: [OrderStatus.PREPARING, OrderStatus.CANCELLED],
   [OrderStatus.CONFIRMED]: [OrderStatus.PREPARING, OrderStatus.CANCELLED],
@@ -38,6 +43,7 @@ const ADMIN_STATUS_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
   [OrderStatus.READY_FOR_PICKUP]: [OrderStatus.CANCELLED],
   [OrderStatus.OTP_VERIFICATION_PENDING]: [OrderStatus.CANCELLED],
 };
+const ASAP_PICKUP_FEE = 5;
 
 type PreparedCheckoutOrder = {
   orderItems: Array<{
@@ -57,6 +63,7 @@ type PreparedCheckoutOrder = {
   subtotal: number;
   tax: number;
   discount: number;
+  pickupFee: number;
   total: number;
   pickupTime: Date;
 };
@@ -91,7 +98,15 @@ export class OrdersService {
           checkoutAttemptId: dto.checkoutAttemptId,
         },
         include: {
-          items: true,
+          items: {
+            include: {
+              foodItem: {
+                select: {
+                  slug: true,
+                },
+              },
+            },
+          },
           payments: { orderBy: { createdAt: 'desc' } },
         },
       });
@@ -125,38 +140,97 @@ export class OrdersService {
     }
 
     const preparedOrder = await this.prepareCheckoutOrder(dto);
-    const orderNumber = `CS-${Date.now()}`;
-    const order = await this.prisma.order.create({
-      data: {
-        orderNumber,
-        checkoutAttemptId: dto.checkoutAttemptId,
-        userId: customer.id,
-        couponId: preparedOrder.coupon?.id,
-        status: OrderStatus.PENDING_PAYMENT,
-        pickupTime: preparedOrder.pickupTime,
-        subtotalAmount: preparedOrder.subtotal,
-        taxAmount: preparedOrder.tax,
-        discountAmount: preparedOrder.discount,
-        totalAmount: preparedOrder.total,
-        estimatedPrepMinutes: dto.pickupSlot.minutesFromNow || 12,
-        items: {
-          create: preparedOrder.orderItems.map((item) => ({
-            foodItemId: item.foodItem.id,
-            name: item.foodItem.name,
-            note: item.note,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            totalPrice: item.totalPrice,
-          })),
-        },
-      },
-      include: {
-        items: true,
-        payments: { orderBy: { createdAt: 'desc' } },
-      },
+    const order = await this.createPendingCheckoutOrder({
+      dto,
+      customerId: customer.id,
+      preparedOrder,
     });
 
     return this.attachProviderOrderToPendingOrder(order);
+  }
+
+  async createCashCheckoutOrder(
+    dto: StartCheckoutOrderDto,
+    customerEmail?: string,
+    syncSecret?: string,
+  ) {
+    const customer = await this.resolveCheckoutCustomer(
+      customerEmail,
+      syncSecret,
+    );
+
+    if (dto.checkoutAttemptId) {
+      const existingOrder = await this.prisma.order.findFirst({
+        where: {
+          userId: customer.id,
+          checkoutAttemptId: dto.checkoutAttemptId,
+        },
+        include: {
+          items: true,
+          payments: { orderBy: { createdAt: 'desc' } },
+        },
+      });
+
+      if (existingOrder) {
+        return this.serializeCheckoutOrder(existingOrder);
+      }
+    }
+
+    const preparedOrder = await this.prepareCheckoutOrder(dto);
+    const order = await this.createPendingCheckoutOrder({
+      dto,
+      customerId: customer.id,
+      preparedOrder,
+    });
+
+    await this.notificationsService.create({
+      userId: order.userId,
+      type: NotificationType.ORDER_PLACED,
+      title: 'Cash order requested',
+      message: `Your order ${order.orderNumber} is waiting for counter payment confirmation.`,
+      metadata: {
+        orderNumber: order.orderNumber,
+        status: order.status,
+      },
+    });
+    this.emitOrderUpdated(order.userId, order.orderNumber, order.status);
+
+    return this.serializeCheckoutOrder(order);
+  }
+
+  async createAdminCounterOrder(dto: AdminCreateCounterOrderDto) {
+    const customer = await this.resolveOrCreateCounterCustomer(dto.customer);
+    const preparedOrder = await this.prepareCheckoutOrder(dto);
+    let order = await this.createPendingCheckoutOrder({
+      dto,
+      customerId: customer.id,
+      preparedOrder,
+    });
+
+    if (dto.paymentCollected) {
+      order = await this.markCounterOrderPlaced(order.id, customer.id);
+      await this.sendOrderPlacedNotification(
+        order.userId,
+        order.orderNumber,
+        order.status,
+      );
+    } else {
+      await this.notificationsService.create({
+        userId: order.userId,
+        type: NotificationType.ORDER_PLACED,
+        title: 'Counter order created',
+        message: `Your counter order ${order.orderNumber} is waiting for payment confirmation.`,
+        metadata: {
+          orderNumber: order.orderNumber,
+          status: order.status,
+          source: 'admin_counter',
+        },
+      });
+    }
+
+    this.emitOrderUpdated(order.userId, order.orderNumber, order.status);
+
+    return this.serializeCheckoutOrder(order);
   }
 
   async confirmCheckoutPayment(
@@ -364,7 +438,8 @@ export class OrdersService {
       await this.couponsService.resolveCouponForOrder(dto.couponCode, subtotal);
     const taxableAmount = Math.max(subtotal - discount, 0);
     const tax = Math.round(taxableAmount * 0.05);
-    const total = taxableAmount + tax;
+    const pickupFee = calculatePickupFee(dto.pickupSlot.id);
+    const total = taxableAmount + tax + pickupFee;
     const pickupTime = new Date(
       Date.now() + dto.pickupSlot.minutesFromNow * 60_000,
     );
@@ -375,9 +450,184 @@ export class OrdersService {
       subtotal,
       tax,
       discount,
+      pickupFee,
       total,
       pickupTime,
     };
+  }
+
+  private async createPendingCheckoutOrder(input: {
+    dto: StartCheckoutOrderDto;
+    customerId: string;
+    preparedOrder: PreparedCheckoutOrder;
+  }) {
+    const { dto, customerId, preparedOrder } = input;
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        return await this.prisma.order.create({
+          data: {
+            orderNumber: generateOrderNumber(),
+            checkoutAttemptId: dto.checkoutAttemptId,
+            userId: customerId,
+            couponId: preparedOrder.coupon?.id,
+            status: OrderStatus.PENDING_PAYMENT,
+            pickupTime: preparedOrder.pickupTime,
+            subtotalAmount: preparedOrder.subtotal,
+            taxAmount: preparedOrder.tax,
+            discountAmount: preparedOrder.discount,
+            totalAmount: preparedOrder.total,
+            estimatedPrepMinutes: dto.pickupSlot.minutesFromNow || 12,
+            items: {
+              create: preparedOrder.orderItems.map((item) => ({
+                foodItemId: item.foodItem.id,
+                name: item.foodItem.name,
+                note: item.note,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                totalPrice: item.totalPrice,
+              })),
+            },
+          },
+          include: {
+            items: true,
+            payments: { orderBy: { createdAt: 'desc' } },
+          },
+        });
+      } catch (error) {
+        if (this.isUniqueConstraintError(error) && attempt < 5) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw new InternalServerErrorException('Could not create order number.');
+  }
+
+  private async resolveOrCreateCounterCustomer(input: {
+    email?: string;
+    name?: string;
+    phone: string;
+  }) {
+    const existingUserByPhone = await this.prisma.user.findUnique({
+      where: { phone: input.phone },
+      select: {
+        id: true,
+        role: true,
+        isSuspended: true,
+      },
+    });
+    const existingUserByEmail = input.email
+      ? await this.prisma.user.findUnique({
+          where: { email: input.email },
+          select: {
+            id: true,
+            role: true,
+            isSuspended: true,
+            phone: true,
+          },
+        })
+      : null;
+
+    if (
+      existingUserByPhone &&
+      existingUserByEmail &&
+      existingUserByPhone.id !== existingUserByEmail.id
+    ) {
+      throw new BadRequestException(
+        'Phone number and email belong to different customers.',
+      );
+    }
+
+    const existingUser = existingUserByPhone ?? existingUserByEmail;
+
+    if (existingUser && existingUser.role !== UserRole.CUSTOMER) {
+      throw new BadRequestException(
+        'Counter orders can only be created for customer accounts.',
+      );
+    }
+
+    if (existingUser?.isSuspended) {
+      throw new BadRequestException('This customer account is suspended.');
+    }
+
+    const customerEmail = input.email ?? createCounterCustomerEmail(input.phone);
+    const user = existingUser
+      ? await this.prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            ...(input.name ? { name: input.name } : {}),
+            ...(input.email ? { email: input.email } : {}),
+            phone: input.phone,
+            lastActivity: new Date(),
+          },
+          select: { id: true },
+        })
+      : await this.prisma.user.create({
+          data: {
+            email: customerEmail,
+            name: input.name,
+            phone: input.phone,
+            role: UserRole.CUSTOMER,
+            provider: AuthProvider.CREDENTIALS,
+            adminApprovalStatus: AdminApprovalStatus.APPROVED,
+            lastActivity: new Date(),
+          },
+          select: { id: true },
+        });
+
+    await this.prisma.cart.upsert({
+      where: { userId: user.id },
+      update: {},
+      create: { userId: user.id },
+    });
+
+    return user;
+  }
+
+  private async markCounterOrderPlaced(orderId: string, userId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.PLACED,
+          placedAt: new Date(),
+          cancelledAt: null,
+        },
+        include: {
+          items: true,
+          payments: { orderBy: { createdAt: 'desc' } },
+        },
+      });
+
+      if (order.couponId) {
+        const existingUsage = await tx.couponUsage.findFirst({
+          where: {
+            orderId: order.id,
+            couponId: order.couponId,
+          },
+          select: { id: true },
+        });
+
+        if (!existingUsage) {
+          await tx.coupon.update({
+            where: { id: order.couponId },
+            data: { usedCount: { increment: 1 } },
+          });
+          await tx.couponUsage.create({
+            data: {
+              couponId: order.couponId,
+              userId,
+              orderId: order.id,
+            },
+          });
+        }
+      }
+
+      return order;
+    });
   }
 
   private async attachProviderOrderToPendingOrder(order: {
@@ -885,6 +1135,7 @@ export class OrdersService {
       subtotalAmount: order.subtotalAmount.toNumber(),
       taxAmount: order.taxAmount.toNumber(),
       discountAmount: order.discountAmount.toNumber(),
+      pickupFeeAmount: calculateDerivedPickupFee(order),
       totalAmount: order.totalAmount.toNumber(),
       paymentId: order.payments[0]?.providerPaymentId,
       items: order.items.map((item) => ({
@@ -1058,6 +1309,7 @@ export class OrdersService {
       subtotalAmount: order.subtotalAmount.toNumber(),
       taxAmount: order.taxAmount.toNumber(),
       discountAmount: order.discountAmount.toNumber(),
+      pickupFeeAmount: calculateDerivedPickupFee(order),
       totalAmount: order.totalAmount.toNumber(),
       couponCode: order.coupon?.code ?? null,
       reviewRating,
@@ -1149,7 +1401,7 @@ export class OrdersService {
           order.placedAt?.toISOString() ?? order.createdAt.toISOString(),
         pickupTime: order.pickupTime?.toISOString(),
         totalAmount: order.totalAmount.toNumber(),
-        itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
+        itemCount: order.items.reduce<number>((sum, item) => sum + item.quantity, 0),
         itemPreview: order.items.slice(0, 3).map((item) => item.name),
       })),
       meta: {
@@ -1165,6 +1417,32 @@ export class OrdersService {
     const where: Prisma.OrderWhereInput = {
       AND: [
         query.status ? { status: query.status } : {},
+        query.dateFrom || query.dateTo
+          ? {
+              createdAt: {
+                ...(query.dateFrom ? { gte: query.dateFrom } : {}),
+                ...(query.dateTo ? { lt: query.dateTo } : {}),
+              },
+            }
+          : {},
+        query.minTotal !== undefined || query.maxTotal !== undefined
+          ? {
+              totalAmount: {
+                ...(query.minTotal !== undefined ? { gte: query.minTotal } : {}),
+                ...(query.maxTotal !== undefined ? { lte: query.maxTotal } : {}),
+              },
+            }
+          : {},
+        query.paymentStatus === 'NONE'
+          ? { payments: { none: {} } }
+          : query.paymentStatus
+            ? { payments: { some: { status: query.paymentStatus } } }
+            : {},
+        query.paymentProvider === 'CASH'
+          ? { payments: { none: {} } }
+          : query.paymentProvider
+            ? { payments: { some: { provider: query.paymentProvider } } }
+            : {},
         query.search
           ? {
               OR: [
@@ -1174,6 +1452,11 @@ export class OrdersService {
                 {
                   user: {
                     email: { contains: query.search, mode: 'insensitive' },
+                  },
+                },
+                {
+                  user: {
+                    phone: { contains: query.search, mode: 'insensitive' },
                   },
                 },
                 {
@@ -1209,6 +1492,7 @@ export class OrdersService {
             select: {
               name: true,
               email: true,
+              phone: true,
             },
           },
         },
@@ -1239,6 +1523,7 @@ export class OrdersService {
         customer: {
           name: order.user.name,
           email: order.user.email,
+          phone: order.user.phone,
         },
         allowedStatusUpdates: getAllowedStatusUpdates(order.status),
       })),
@@ -1256,7 +1541,15 @@ export class OrdersService {
     let order = await this.prisma.order.findUnique({
       where: { orderNumber },
       include: {
-        items: true,
+        items: {
+          include: {
+            foodItem: {
+              select: {
+                slug: true,
+              },
+            },
+          },
+        },
         payments: {
           orderBy: { createdAt: 'desc' },
         },
@@ -1269,6 +1562,7 @@ export class OrdersService {
           select: {
             name: true,
             email: true,
+            phone: true,
           },
         },
       },
@@ -1295,12 +1589,14 @@ export class OrdersService {
       subtotalAmount: order.subtotalAmount.toNumber(),
       taxAmount: order.taxAmount.toNumber(),
       discountAmount: order.discountAmount.toNumber(),
+      pickupFeeAmount: calculateDerivedPickupFee(order),
       totalAmount: order.totalAmount.toNumber(),
       couponCode: order.coupon?.code ?? null,
       pickupOtp,
       customer: {
         name: order.user.name,
         email: order.user.email,
+        phone: order.user.phone,
       },
       payment: getDisplayPayment(order.payments)
         ? {
@@ -1330,6 +1626,7 @@ export class OrdersService {
       select: {
         id: true,
         status: true,
+        couponId: true,
       },
     });
 
@@ -1345,25 +1642,57 @@ export class OrdersService {
       );
     }
 
-    const updatedOrder = await this.prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: input.status,
-        completedAt: input.status === OrderStatus.COMPLETED ? new Date() : null,
-        cancelledAt: input.status === OrderStatus.CANCELLED ? new Date() : null,
-      },
-      include: {
-        items: true,
-        payments: {
-          orderBy: { createdAt: 'desc' },
-          take: 1,
+    const updatedOrder = await this.prisma.$transaction(async (tx) => {
+      const nextOrder = await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: input.status,
+          placedAt:
+            input.status === OrderStatus.PLACED && order.status === OrderStatus.PENDING_PAYMENT
+              ? new Date()
+              : undefined,
+          completedAt: input.status === OrderStatus.COMPLETED ? new Date() : null,
+          cancelledAt: input.status === OrderStatus.CANCELLED ? new Date() : null,
         },
-        coupon: {
-          select: {
-            code: true,
+        include: {
+          items: true,
+          payments: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+          coupon: {
+            select: {
+              code: true,
+            },
           },
         },
-      },
+      });
+
+      if (input.status === OrderStatus.PLACED && order.couponId) {
+        const existingUsage = await tx.couponUsage.findFirst({
+          where: {
+            orderId: order.id,
+            couponId: order.couponId,
+          },
+          select: { id: true },
+        });
+
+        if (!existingUsage) {
+          await tx.coupon.update({
+            where: { id: order.couponId },
+            data: { usedCount: { increment: 1 } },
+          });
+          await tx.couponUsage.create({
+            data: {
+              couponId: order.couponId,
+              userId: nextOrder.userId,
+              orderId: order.id,
+            },
+          });
+        }
+      }
+
+      return nextOrder;
     });
 
     if (
@@ -1405,6 +1734,7 @@ export class OrdersService {
       subtotalAmount: updatedOrder.subtotalAmount.toNumber(),
       taxAmount: updatedOrder.taxAmount.toNumber(),
       discountAmount: updatedOrder.discountAmount.toNumber(),
+      pickupFeeAmount: calculateDerivedPickupFee(updatedOrder),
       totalAmount: updatedOrder.totalAmount.toNumber(),
       couponCode: updatedOrder.coupon?.code ?? null,
       payment: getDisplayPayment(updatedOrder.payments)
@@ -1495,12 +1825,13 @@ export class OrdersService {
                 code: true,
               },
             },
-            user: {
-              select: {
-                name: true,
-                email: true,
-              },
-            },
+	            user: {
+	              select: {
+	                name: true,
+	                email: true,
+	                phone: true,
+	              },
+	            },
           },
         });
       } catch (error) {
@@ -1638,6 +1969,38 @@ function getDisplayPayment<T extends { status: PaymentStatus }>(payments: T[]) {
 
 function getAllowedStatusUpdates(status: OrderStatus) {
   return ADMIN_STATUS_TRANSITIONS[status] ?? [];
+}
+
+function calculatePickupFee(pickupSlotId: string) {
+  return pickupSlotId === 'asap' ? ASAP_PICKUP_FEE : 0;
+}
+
+function calculateDerivedPickupFee(order: {
+  subtotalAmount: Prisma.Decimal;
+  taxAmount: Prisma.Decimal;
+  discountAmount: Prisma.Decimal;
+  totalAmount: Prisma.Decimal;
+}) {
+  const expectedTotalWithoutPickupFee =
+    order.subtotalAmount.toNumber() -
+    order.discountAmount.toNumber() +
+    order.taxAmount.toNumber();
+  const fee = order.totalAmount.toNumber() - expectedTotalWithoutPickupFee;
+
+  return Math.max(0, Math.round(fee * 100) / 100);
+}
+
+function generateOrderNumber() {
+  const timestampPart = Date.now().toString().slice(-6);
+  const randomPart = randomInt(10, 100);
+
+  return `CS-${timestampPart}${randomPart}`;
+}
+
+function createCounterCustomerEmail(phone: string) {
+  const normalizedPhone = phone.replace(/\D/g, '') || phone.replace(/[^a-zA-Z0-9]/g, '');
+
+  return `counter+${normalizedPhone}@crumbstall.local`;
 }
 
 function getOrderStatusLabel(status: OrderStatus) {

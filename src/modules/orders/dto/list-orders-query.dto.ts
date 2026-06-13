@@ -1,11 +1,17 @@
 import { BadRequestException } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
 
 export type ListOrdersQuery = {
   page: number;
   limit: number;
   status?: OrderStatus;
   search?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  minTotal?: number;
+  maxTotal?: number;
+  paymentStatus?: PaymentStatus | 'NONE';
+  paymentProvider?: PaymentProvider | 'CASH';
 };
 
 export function parseListOrdersQuery(
@@ -16,6 +22,12 @@ export function parseListOrdersQuery(
     limit: parsePositiveInt(query.limit, 'limit', 10, 1, 50),
     status: parseOrderStatus(query.status),
     search: parseOptionalString(query.search),
+    dateFrom: parseOptionalDate(query.dateFrom, 'dateFrom'),
+    dateTo: parseOptionalDate(query.dateTo, 'dateTo', true),
+    minTotal: parseOptionalMoney(query.minTotal, 'minTotal'),
+    maxTotal: parseOptionalMoney(query.maxTotal, 'maxTotal'),
+    paymentStatus: parsePaymentStatus(query.paymentStatus),
+    paymentProvider: parsePaymentProvider(query.paymentProvider),
   };
 }
 
@@ -33,6 +45,80 @@ function parseOrderStatus(value: unknown) {
   }
 
   return status as OrderStatus;
+}
+
+function parsePaymentStatus(value: unknown) {
+  const status = parseOptionalString(value);
+
+  if (!status) {
+    return undefined;
+  }
+
+  if (status === 'NONE') {
+    return status;
+  }
+
+  if (!Object.values(PaymentStatus).includes(status as PaymentStatus)) {
+    throw new BadRequestException(
+      `paymentStatus must be NONE or one of: ${Object.values(PaymentStatus).join(', ')}`,
+    );
+  }
+
+  return status as PaymentStatus;
+}
+
+function parsePaymentProvider(value: unknown) {
+  const provider = parseOptionalString(value);
+
+  if (!provider) {
+    return undefined;
+  }
+
+  if (provider === 'CASH') {
+    return provider;
+  }
+
+  if (!Object.values(PaymentProvider).includes(provider as PaymentProvider)) {
+    throw new BadRequestException(
+      `paymentProvider must be CASH or one of: ${Object.values(PaymentProvider).join(', ')}`,
+    );
+  }
+
+  return provider as PaymentProvider;
+}
+
+function parseOptionalDate(value: unknown, field: string, endOfDay = false) {
+  const rawDate = parseOptionalString(value);
+
+  if (!rawDate) {
+    return undefined;
+  }
+
+  const date = new Date(`${rawDate}T00:00:00.000Z`);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new BadRequestException(`${field} must be a valid date.`);
+  }
+
+  if (endOfDay) {
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+
+  return date;
+}
+
+function parseOptionalMoney(value: unknown, field: string) {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue) || numberValue < 0) {
+    throw new BadRequestException(`${field} must be a positive number.`);
+  }
+
+  return numberValue;
 }
 
 function parseOptionalString(value: unknown) {
